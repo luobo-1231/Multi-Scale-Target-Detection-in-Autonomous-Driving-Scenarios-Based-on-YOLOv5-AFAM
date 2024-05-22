@@ -1,0 +1,26 @@
+<annotation>
+	<folder>JPEG</folder>
+	<filename>打击目标1.jpg</filename>
+	<path>D:\资料\组会\华北五省比赛\素材包\人物\JPEG\打击目标1.jpg</path>
+	<source>
+		<database>Unknown</database>
+	</source>
+	<size>
+		<width>500</width>
+		<height>500</height>
+		<depth>3</depth>
+	</size>
+	<segmented>0</segmented>
+	<object>
+		<name>enemy</name>
+		<pose>Unspecified</pose>
+		<truncated>0</truncated>
+		<difficult>0</difficult>
+		<bndbox>
+			<xmin>51</xmin>
+			<ymin>4</ymin>
+			<xmax>495</xmax>
+			<ymax>497</ymax>
+		</bndbox>
+	</object>
+</annotation>

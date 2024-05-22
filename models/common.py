@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.cuda import amp
+import torch.nn.functional as F#后加的
 
 # Import 'ultralytics' package or install if if missing
 try:
@@ -163,6 +164,151 @@ class CrossConv(nn.Module):
 
     def forward(self, x):
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
+
+class SE(nn.Module):#后加的
+    def __init__(self, c1, c2, ratio=16):#后加的
+        super(SE, self).__init__()#后加的
+        #c*1*1#后加的
+        self.avgpool = nn.AdaptiveAvgPool2d(1)#后加的
+        self.l1 = nn.Linear(c1, c1 // ratio, bias=False)#后加的
+        self.relu = nn.ReLU(inplace=True)#后加的
+        self.l2 = nn.Linear(c1 // ratio, c1, bias=False)#后加的
+        self.sig = nn.Sigmoid()#后加的
+
+    def forward(self, x):#后加的
+        b, c, _, _ = x.size()#后加的
+        y = self.avgpool(x).view(b, c)#后加的
+        y = self.l1(y)#后加的
+        y = self.relu(y)#后加的
+        y = self.l2(y)#后加的
+        y = self.sig(y)#后加的
+        y = y.view(b, c, 1, 1)#后加的
+        return x * y.expand_as(x)#后加的
+
+
+class ACM(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super(ACM, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=1)
+        self.conv3 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv5 = nn.Conv2d(channels, channels, kernel_size=5, padding=2)
+        self.weights = nn.Parameter(torch.ones(3))
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False)
+        )
+
+    def forward(self, x):
+        conv1_out = self.conv1(x)
+        conv3_out = self.conv3(x)
+        conv5_out = self.conv5(x)
+
+        fusion_out = conv1_out * self.weights[0] + conv3_out * self.weights[1] + conv5_out * self.weights[2]
+        avg_out = F.adaptive_avg_pool2d(fusion_out, (1, 1))
+        max_out = F.adaptive_max_pool2d(fusion_out, (1, 1))
+
+        avg_out = avg_out.view(avg_out.size(0), -1)
+        max_out = max_out.view(max_out.size(0), -1)
+
+        avg_attention = self.mlp(avg_out)
+        max_attention = self.mlp(max_out)
+
+        attention = torch.sigmoid(avg_attention + max_attention).view(fusion_out.size(0), -1, 1, 1)
+        return attention * x
+
+
+class FSM(nn.Module):
+    def __init__(self, channels):
+        super(FSM, self).__init__()
+        self.conv3x3 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.refine_conv = nn.Conv2d(channels * 3, channels, kernel_size=1)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        maxpool_out = F.max_pool2d(x, (h, w))
+        avgpool_out = F.adaptive_avg_pool2d(x, (h, w))
+        conv3x3_out = self.conv3x3(x)
+
+        # 需要在cat之前调整maxpool_out和avgpool_out的大小以匹配conv3x3_out的尺寸
+        maxpool_out = maxpool_out.expand_as(conv3x3_out)
+        avgpool_out = avgpool_out.expand_as(conv3x3_out)
+
+        fusion_out = torch.cat([maxpool_out, avgpool_out, conv3x3_out], dim=1)
+        fusion_out = self.refine_conv(fusion_out)
+        return torch.sigmoid(fusion_out)
+
+# C3AFAM模块，集成了C3, ACM, FSM
+class C3AFAM(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super(C3AFAM, self).__init__()
+        self.c3 = C3(c1, c2, n, shortcut, g, e)
+        self.acm = ACM(c2)  # 假设ACM的通道数等于C3模块输出的通道数
+        self.fsm = FSM(c2)  # 同上，FSM的通道数等于C3模块输出的通道数
+
+    def forward(self, x):
+        x = self.c3(x)
+        x = self.acm(x)
+        x = self.fsm(x)
+        return x
+
+class DownC(nn.Module):
+    def __init__(self, input_channels):
+        super(DownC, self).__init__()
+        self.all_conv_branch = nn.Sequential(
+            nn.Conv2d(input_channels, input_channels // 2, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(input_channels // 2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(input_channels // 2, input_channels // 2, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(input_channels // 2),
+            nn.ReLU(inplace=True)
+        )
+
+        self.maxpool_conv_branch = nn.Sequential(
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(input_channels, input_channels // 2, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(input_channels // 2),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        x1 = self.all_conv_branch(x)
+        x2 = self.maxpool_conv_branch(x)
+        x_cat = torch.cat((x1, x2), 1)
+        return x_cat
+
+
+
+
+class EMA(nn.Module):
+    def __init__(self, channels, factor=8):
+        super(EMA, self).__init__()
+        self.groups = factor
+        assert channels // self.groups > 0
+        self.softmax = nn.Softmax(-1)
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.gn = nn.GroupNorm(channels // self.groups, channels // self.groups)
+        self.conv1x1 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=1, stride=1, padding=0)
+        self.conv3x3 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        group_x = x.reshape(b * self.groups, -1, h, w)  # b*g,c//g,h,w
+        x_h = self.pool_h(group_x)
+        x_w = self.pool_w(group_x).permute(0, 1, 3, 2)
+        hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))
+        x_h, x_w = torch.split(hw, [h, w], dim=2)
+        x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())
+        x2 = self.conv3x3(group_x)
+        x11 = self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x12 = x2.reshape(b * self.groups, c // self.groups, -1)  # b*g, c//g, hw
+        x21 = self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x22 = x1.reshape(b * self.groups, c // self.groups, -1)  # b*g, c//g, hw
+        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(b * self.groups, 1, h, w)
+        return (group_x * weights.sigmoid()).reshape(b, c, h, w)
 
 
 class C3(nn.Module):

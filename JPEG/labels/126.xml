@@ -1,0 +1,26 @@
+<annotation>
+	<folder>train</folder>
+	<filename>126.jpg</filename>
+	<path>D:\yolov5\JPEG\train\126.jpg</path>
+	<source>
+		<database>Unknown</database>
+	</source>
+	<size>
+		<width>325</width>
+		<height>664</height>
+		<depth>3</depth>
+	</size>
+	<segmented>0</segmented>
+	<object>
+		<name>friend</name>
+		<pose>Unspecified</pose>
+		<truncated>0</truncated>
+		<difficult>0</difficult>
+		<bndbox>
+			<xmin>75</xmin>
+			<ymin>24</ymin>
+			<xmax>314</xmax>
+			<ymax>643</ymax>
+		</bndbox>
+	</object>
+</annotation>
